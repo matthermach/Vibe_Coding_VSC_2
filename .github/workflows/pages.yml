@@ -1,0 +1,54 @@
+name: Publish Forma to GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Validate public configuration and prepare site
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          require('./shared-store.js');
+          const config = {
+            url: process.env.SUPABASE_URL,
+            publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY
+          };
+          SharedWorkspace.validateConfig(config);
+          fs.mkdirSync('_site', { recursive: true });
+          const files = [
+            'index.html', 'styles.css', 'app.js', 'forecast.js',
+            'jstat.min.js', 'lucide.min.js', 'supabase.min.js', 'shared-store.js',
+            'LICENSE-jstat.txt', 'LICENSE-lucide.txt', 'LICENSE-supabase.txt'
+          ];
+          for (const file of files) fs.copyFileSync(file, '_site/' + file);
+          fs.writeFileSync('_site/cloud-config.js', 'globalThis.FORMA_CLOUD = ' + JSON.stringify(config) + ';\n');
+          fs.writeFileSync('_site/.nojekyll', '');
+          NODE
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

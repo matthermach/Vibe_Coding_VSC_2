@@ -69,6 +69,11 @@
   let state;
   let storageAvailable = true;
   try { const stored = localStorage.getItem(storageKey); state = stored ? validate(JSON.parse(stored)) : demo(); } catch { state = demo(); }
+  const cloudMode = Boolean(globalThis.FORMA_CLOUD?.url || globalThis.FORMA_CLOUD?.publishableKey || location.protocol !== 'file:');
+  let shared = null;
+  let cloudStatus = { phase: cloudMode ? 'loading' : 'local', session: null, hasData: false, message: '' };
+  const emptyWorkspace = () => ({ version: 1, horizon, skills: [], teams: [], initiatives: [] });
+  const cloudBlocked = () => cloudMode && !['ready', 'pending', 'saving'].includes(cloudStatus.phase);
   let currentView = 'roadmap';
   let forecast = null;
   let stale = true;
@@ -85,10 +90,12 @@
   function notify(message) { const toast = document.querySelector('#toast'); toast.textContent = message; toast.classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('visible'), 4000); }
   function save() {
     revision++; stale = true;
+    if (cloudMode) { shared.queue(state); return; }
     try { localStorage.setItem(storageKey, JSON.stringify(state)); storageAvailable = true; } catch { storageAvailable = false; notify('Brak dostępu do zapisu lokalnego. Wyeksportuj dane przed zamknięciem.'); }
     document.querySelector('#save-status').innerHTML = `<span class="local-indicator"></span>${storageAvailable ? 'Zapisano lokalnie' : 'Brak zapisu lokalnego'}`;
   }
   function runSimulation() {
+    if (cloudBlocked()) return;
     if (computing) return;
     try { validate(state); } catch (error) { notify(error.message); return; }
     computing = true;
@@ -186,7 +193,43 @@
     return heading('Przegląd portfolio', 'Inicjatywy, zasoby i ryzyko terminów', simulationButton() + button('add-initiative', 'Dodaj inicjatywę', 'plus', true)) + metrics() + `<section class="tool"><div class="tool-heading"><h2>${icon('list-checks')}Prognozy elementów</h2><span class="badge green">P85</span></div><div class="table-scroll"><table class="overview-table"><thead><tr><th>Inicjatywa / element</th><th>Zespół</th><th>Min–max os.dni</th><th>Koniec P50</th><th>Koniec P85</th><th>Fixed date</th><th>Szansa terminu</th></tr></thead><tbody>${state.initiatives.flatMap(initiative => initiative.items.map(item => { const value = result(item.id); return `<tr><td>${escape(item.name)}<small>${escape(initiative.name)}</small></td><td>${escape(teamName(item.teamId))}<small>${escape(skillName(item.skillId))}</small></td><td class="mono">${item.min}–${item.max}</td><td>${stale ? '—' : prettyDate(value?.p50)}</td><td>${stale ? '—' : prettyDate(value?.p85)}</td><td>${item.fixed ? fullDate(item.deadline) : '—'}</td><td>${item.fixed && value ? `<span class="badge ${value.probability >= .85 ? 'green' : 'orange'}">${percent(value.probability)}</span>` : '—'}</td></tr>`; })).join('') || '<tr><td colspan="7" class="empty">Brak elementów w planie</td></tr>'}</tbody></table></div></section>` + cards();
   }
   function refreshIcons(root) { if (globalThis.lucide) lucide.createIcons({ root: root || document }); }
+  function cloudChrome() {
+    if (!cloudMode) return;
+    const labels = { loading: 'Łączenie z bazą…', 'signed-out': 'Wymagane logowanie', denied: 'Brak dostępu', ready: 'Zapisano w bazie', empty: 'Pusty workspace', pending: 'Oczekuje na zapis…', saving: 'Zapisywanie…', conflict: 'Konflikt wersji', error: 'Błąd połączenia', setup: 'Brak konfiguracji bazy' };
+    document.querySelector('#save-status').innerHTML = `<span class="local-indicator"></span>${labels[cloudStatus.phase] || 'Supabase'}`;
+    document.querySelector('#workspace-mode').textContent = 'Wspólny workspace';
+    document.querySelector('#storage-mode').textContent = 'Wspólna baza · Supabase';
+    document.querySelector('#account-action').hidden = !cloudStatus.session;
+    document.querySelector('#account-action').title = cloudStatus.session ? `Wyloguj ${cloudStatus.session.user.email || ''}` : 'Wyloguj';
+    document.querySelector('.profile small').textContent = cloudStatus.session?.user.email || 'Dostęp po zalogowaniu';
+    document.querySelector('.top-avatar').textContent = cloudStatus.session?.user.email ? initials(cloudStatus.session.user.email) : 'TY';
+    document.querySelectorAll('.topbar [data-action="import"],.topbar [data-action="export"],.sidebar-bottom [data-action="export"]').forEach(control => { control.disabled = cloudBlocked(); });
+  }
+  function cloudGate() {
+    const phase = cloudStatus.phase;
+    let title = 'Łączenie z workspace';
+    let content = '<p class="cloud-note">Trwa sprawdzanie sesji i dostępu do bazy.</p>';
+    if (phase === 'signed-out') {
+      title = 'Zaloguj się do workspace';
+      content = `<form id="cloud-login" class="cloud-login"><label class="form-field">Adres e-mail<input name="email" type="email" autocomplete="email" placeholder="ty@firma.pl" required maxlength="254"></label><button class="button primary">${icon('mail')}Wyślij link do logowania</button><p class="cloud-note" id="login-result" role="status">Dostęp wyłącznie dla zatwierdzonych kont.</p></form>`;
+    }
+    if (phase === 'setup') { title = 'Brak konfiguracji bazy'; content = '<p class="cloud-note">Połączenie z Supabase nie zostało skonfigurowane.</p>'; }
+    if (phase === 'denied') { title = 'Brak dostępu do workspace'; content = `<p class="cloud-note">${escape(cloudStatus.message)}</p><div class="cloud-actions">${button('cloud-refresh', 'Sprawdź dostęp ponownie', 'refresh-cw')}${button('cloud-logout', 'Wyloguj', 'log-out')}</div>`; }
+    if (phase === 'empty') {
+      title = 'Nowy wspólny workspace';
+      let localData = false;
+      try { localData = Boolean(localStorage.getItem(storageKey)); } catch {}
+      content = `<p class="cloud-note">W bazie nie ma jeszcze planu.</p><div class="cloud-actions">${button('cloud-init-empty', 'Utwórz pusty plan', 'plus', true)}${localData ? button('cloud-init-local', 'Przenieś dane z tego urządzenia', 'upload') : ''}</div>`;
+    }
+    if (phase === 'conflict' || phase === 'error') {
+      title = phase === 'conflict' ? 'Ktoś zmienił wspólny plan' : 'Nie udało się połączyć z bazą';
+      content = `<p class="cloud-note">${phase === 'conflict' ? 'Twoje zmiany nie nadpisały nowszej wersji. Wyeksportuj je przed pobraniem aktualnego planu.' : 'Zmiany oczekujące na zapis nie zostały potwierdzone przez bazę.'}</p><div class="cloud-actions">${phase === 'error' ? button('cloud-retry', 'Ponów połączenie', 'refresh-cw', true) : ''}${cloudStatus.session ? button('cloud-refresh', 'Pobierz aktualny plan', 'cloud-download', phase === 'conflict') : button('cloud-logout', 'Wróć do logowania', 'log-in')}${cloudStatus.session && shared?.hasPending() ? button('export', 'Eksportuj swoje zmiany', 'download') : ''}</div>`;
+    }
+    return `<section class="cloud-gate"><div class="cloud-symbol">${icon(phase === 'loading' ? 'loader-circle' : phase === 'conflict' ? 'git-compare-arrows' : 'lock-keyhole')}</div><div class="eyebrow">FORMA / WSPÓLNY WORKSPACE</div><h1>${title}</h1>${content}</section>`;
+  }
   function render() {
+    cloudChrome();
+    if (cloudBlocked()) { app.innerHTML = cloudGate(); refreshIcons(); return; }
     const views = { roadmap, overview, capacity: capacityView, teams: teamsView };
     app.innerHTML = views[currentView]();
     document.querySelector('#breadcrumb').textContent = { roadmap: 'Roadmapa i prognozy', overview: 'Przegląd portfolio', capacity: 'Kalendarz capacity', teams: 'Zespoły i kompetencje' }[currentView];
@@ -234,13 +277,38 @@
   document.addEventListener('click', event => {
     const target = event.target.closest('[data-action],[data-view]');
     if (!target) return;
-    if (target.dataset.view) { currentView = target.dataset.view; render(); return; }
     const action = target.dataset.action;
     const id = target.dataset.id;
+    if (action?.startsWith('cloud-')) {
+      if (!shared) { notify('Najpierw skonfiguruj bazę Supabase.'); return; }
+      if (action === 'cloud-logout') {
+        if (shared.hasPending() && !confirm('Wylogowanie odrzuci zmiany niepotwierdzone przez bazę. Kontynuować?')) return;
+        void shared.logout().catch(error => notify(error.message));
+      }
+      if (action === 'cloud-refresh') {
+        if (shared.hasPending() && !confirm('Odrzucić swoje niepotwierdzone zmiany i pobrać plan z bazy?')) return;
+        void shared.reload();
+      }
+      if (action === 'cloud-retry') void shared.retry();
+      if (action === 'cloud-init-empty' || action === 'cloud-init-local') {
+        if (cloudStatus.phase !== 'empty' || !shared.canEdit()) return;
+        try {
+          const next = action === 'cloud-init-empty' ? emptyWorkspace() : validate(JSON.parse(localStorage.getItem(storageKey)));
+          if (action === 'cloud-init-local' && !confirm('Przenieść lokalny plan do wspólnej bazy dla wszystkich zatwierdzonych użytkowników?')) return;
+          state = structuredClone(next); save(); render(); runSimulation();
+        } catch (error) { notify(error.message); }
+      }
+      return;
+    }
+    if (action === 'close-dialog') { closeDialog(); return; }
+    if (cloudBlocked()) {
+      if (action === 'export' && cloudStatus.session && ['conflict', 'error'].includes(cloudStatus.phase) && shared?.hasPending()) exportWorkspace();
+      return;
+    }
+    if (target.dataset.view) { currentView = target.dataset.view; render(); return; }
     if (action === 'simulate') runSimulation();
     if (action === 'export') exportWorkspace();
     if (action === 'import') document.querySelector('#import-file').click();
-    if (action === 'close-dialog') closeDialog();
     if (action === 'add-initiative') openInitiative();
     if (action === 'edit-initiative') openInitiative(id);
     if (action === 'add-team') openTeam();
@@ -283,6 +351,7 @@
   });
   document.addEventListener('change', event => {
     const input = event.target;
+    if (cloudBlocked()) return;
     if (input.matches('[data-capacity]')) {
       if (!input.checkValidity() || !input.value) { input.reportValidity(); input.value = state.teams.find(team => team.id === input.dataset.team).capacity[input.dataset.month]?.[input.dataset.skill] || 0; return; }
       const team = state.teams.find(entry => entry.id === input.dataset.team); team.capacity[input.dataset.month] ||= {}; team.capacity[input.dataset.month][input.dataset.skill] = Number(input.value); save();
@@ -306,8 +375,10 @@
     }
     if (input.id === 'import-file' && input.files[0]) {
       const file = input.files[0];
+      const importRevision = revision;
       if (file.size > 2000000) { notify('Plik jest zbyt duży (maks. 2 MB).'); input.value = ''; return; }
       file.text().then(text => {
+        if (cloudMode && (cloudBlocked() || revision !== importRevision)) throw Error('Plan lub sesja zmieniły się podczas odczytu pliku. Ponów import.');
         const next = validate(JSON.parse(text));
         if (!confirm('Zastąpić obecny workspace danymi z pliku?')) return;
         state = next; chartFilter = ''; collapsed.clear(); save(); runSimulation(); notify('Workspace zaimportowany.');
@@ -316,6 +387,17 @@
   });
   document.addEventListener('submit', event => {
     event.preventDefault();
+    if (event.target.id === 'cloud-login') {
+      if (!shared || cloudStatus.phase !== 'signed-out') return;
+      const form = event.target;
+      const submit = form.querySelector('button');
+      submit.disabled = true;
+      void shared.login(form.elements.email.value.trim(), location.origin + location.pathname).then(() => {
+        form.querySelector('#login-result').textContent = 'Jeśli konto ma dostęp, otrzymasz e-mail z linkiem do logowania.';
+      }).catch(() => { form.querySelector('#login-result').textContent = 'Nie udało się wysłać linku. Sprawdź adres lub spróbuj ponownie później.'; }).finally(() => { submit.disabled = false; });
+      return;
+    }
+    if (cloudBlocked()) return;
     if (event.target.id === 'skill-form') {
       const name = event.target.elements.skill.value.trim();
       if (!name) return;
@@ -347,5 +429,27 @@
   const tabs = [...document.querySelectorAll('.app-tabs [role=tab]')];
   document.querySelector('.app-tabs').addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const index = tabs.indexOf(document.activeElement); const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; tabs[next].focus(); tabs[next].click(); });
   globalThis.Forma = { getState: () => structuredClone(state), validate };
-  render(); runSimulation();
+  if (cloudMode) {
+    try {
+      SharedWorkspace.validateConfig(globalThis.FORMA_CLOUD);
+      const client = supabase.createClient(FORMA_CLOUD.url, FORMA_CLOUD.publishableKey);
+      shared = SharedWorkspace.create({
+        client, validate,
+        isBusy: () => dialog.open || Boolean(document.activeElement?.closest('[data-capacity]')),
+        onRemote: data => {
+          state = data || emptyWorkspace(); revision++; stale = true; forecast = null; chartFilter = ''; collapsed.clear();
+          if (data && !cloudBlocked()) { render(); runSimulation(); }
+        },
+        onStatus: next => {
+          const wasBlocked = cloudBlocked();
+          cloudStatus = next;
+          if (['signed-out', 'denied'].includes(next.phase)) { state = emptyWorkspace(); forecast = null; stale = true; revision++; if (dialog.open) closeDialog(); }
+          if (wasBlocked || cloudBlocked()) render(); else cloudChrome();
+          if (next.phase === 'ready' && !forecast && !computing) runSimulation();
+        }
+      });
+      render(); void shared.start();
+      globalThis.addEventListener('beforeunload', event => { if (shared.hasPending()) { event.preventDefault(); event.returnValue = ''; } });
+    } catch (error) { cloudStatus = { ...cloudStatus, phase: 'setup', message: error.message }; render(); }
+  } else { render(); runSimulation(); }
 })();
