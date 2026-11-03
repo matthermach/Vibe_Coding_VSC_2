@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pl">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forma | Testy silnika</title>
+<style>body{font:14px monospace;max-width:900px;margin:40px auto;padding:20px;background:#f6f7f9;color:#20252c}li{padding:8px}.pass{color:#147d61}.fail{color:#b85349}</style>
+<h1>Testy silnika Monte Carlo</h1>
+<p id="summary"></p><ol id="results"></ol>
+<script src="jstat.min.js"></script>
+<script src="forecast.js"></script>
+<script>
+  const base = () => ({ horizon: '2026-11-01', teams: [{ id: 'team', skills: ['skill'], capacity: { '2026-11': { skill: 21 } } }], initiatives: [{ id: 'initiative', start: '2026-11-01', items: [{ id: 'first', teamId: 'team', skillId: 'skill', min: 5, max: 5, fixed: true, deadline: '2026-11-06' }] }] });
+  const assert = (condition, message) => { if (!condition) throw Error(message || 'Assertion failed'); };
+  let passed = 0;
+  let failed = 0;
+  const test = (name, run) => { const row = document.createElement('li'); try { run(); passed++; row.className = 'pass'; row.textContent = 'PASS: ' + name; } catch (error) { failed++; row.className = 'fail'; row.textContent = 'FAIL: ' + name + ' / ' + error.message; } document.querySelector('#results').append(row); };
+  test('5 osobodni, weekend pomijany, P85 = 6 listopada', () => { const result = Forecast.simulate(base(), 100); assert(result.results.first.p85 === '2026-11-06'); assert(result.results.first.probability === 1); });
+  test('Zerowe capacity: brak ukonczenia, deadline 0%', () => { const state = base(); state.teams[0].capacity = {}; const result = Forecast.simulate(state, 100); assert(result.results.first.p85 === null); assert(result.results.first.completion === 0); assert(result.results.first.probability === 0); });
+  test('Capacity wspoldzielone przez inicjatywy', () => { const state = base(); state.initiatives.push({ id: 'second-initiative', start: state.horizon, items: [{ ...state.initiatives[0].items[0], id: 'second' }] }); const result = Forecast.simulate(state, 100); assert(result.results.second.start === '2026-11-09'); assert(result.results.second.p85 === '2026-11-13'); });
+  test('Zaleznosc blokuje osobna pule do kolejnego dnia roboczego', () => { const state = base(); state.teams[0].skills.push('other'); state.teams[0].capacity['2026-11'].other = 21; state.initiatives[0].items.push({ id: 'second', teamId: 'team', skillId: 'other', min: 5, max: 5, predecessor: 'first' }); const result = Forecast.simulate(state, 100); assert(result.results.second.start === '2026-11-09'); assert(result.results.second.p85 === '2026-11-13'); });
+  test('Start elementu oraz start inicjatywy sa ograniczeniami', () => { const state = base(); state.initiatives[0].start = '2026-11-10'; state.initiatives[0].items[0].start = '2026-11-16'; const result = Forecast.simulate(state, 100); assert(result.results.first.start === '2026-11-16'); assert(result.results.first.p85 === '2026-11-20'); });
+  test('Rozklad jednostajny min/max reaguje na probki', () => { const state = base(); state.initiatives[0].items[0].max = 10; const lower = Forecast.simulate(state, 100, () => 0); const upper = Forecast.simulate(state, 100, () => 1); assert(lower.results.first.p85 === '2026-11-06'); assert(upper.results.first.p85 === '2026-11-13'); });
+  test('Wspolne P85 inicjatywy, portfolio i szansa wszystkich terminow', () => { const state = base(); state.initiatives[0].items.push({ id: 'second', teamId: 'team', skillId: 'skill', min: 5, max: 5, fixed: true, deadline: '2026-11-12' }); const result = Forecast.simulate(state, 100); assert(result.initiatives.initiative.p85 === '2026-11-13'); assert(result.portfolio.p85 === '2026-11-13'); assert(result.initiatives.initiative.probability === 0); assert(result.portfolio.probability === 0); });
+  test('Praca przechodzi przez miesiac z capacity 0', () => { const state = base(); state.initiatives[0].items[0].min = 25; state.initiatives[0].items[0].max = 25; state.teams[0].capacity['2027-01'] = { skill: 21 }; const result = Forecast.simulate(state, 100); assert(result.results.first.p85 === '2027-01-06'); });
+  test('Brak capacity poprzednika blokuje nastepce', () => { const state = base(); state.teams[0].skills.push('other'); state.teams[0].capacity = { '2026-11': { other: 21 } }; state.initiatives[0].items.push({ id: 'second', teamId: 'team', skillId: 'other', min: 5, max: 5, predecessor: 'first' }); const result = Forecast.simulate(state, 100); assert(result.results.second.completion === 0); assert(result.portfolio.p85 === null); });
+  test('Rok przestepny i 12 miesiecy kalendarza', () => { const result = Forecast.calendar('2028-02-01'); assert(result.days.length === 366); assert(result.days.some(day => day.date === '2028-02-29')); assert(result.workdays['2028-02'] === 21); });
+  test('P85 nie ignoruje prob nieukonczonych w horyzoncie', () => { const state = base(); state.initiatives[0].items[0].min = 1; state.initiatives[0].items[0].max = 100; let sample = 0; const result = Forecast.simulate(state, 100, () => sample++ < 84 ? 0 : 1); assert(result.results.first.completion === .84); assert(result.results.first.p50 !== null); assert(result.results.first.p85 === null); });
+  test('Wspolne P85 moze byc pozniejsze niz P85 kazdego elementu', () => { const state = base(); state.teams[0].skills.push('other'); state.teams[0].capacity['2026-11'].other = 21; state.initiatives[0].items[0].max = 10; state.initiatives[0].items.push({ id: 'second', teamId: 'team', skillId: 'other', min: 5, max: 10 }); let draw = 0; const result = Forecast.simulate(state, 100, () => { const trial = Math.floor(draw / 2); const second = draw++ % 2; return (!second && trial < 10) || (second && trial >= 10 && trial < 20) ? 1 : 0; }); assert(result.results.first.p85 === '2026-11-06'); assert(result.results.second.p85 === '2026-11-06'); assert(result.initiatives.initiative.p85 === '2026-11-13'); });
+  document.querySelector('#summary').textContent = passed + ' PASS / ' + failed + ' FAIL';
+  document.body.dataset.failures = failed;
+</script>
+</html>
